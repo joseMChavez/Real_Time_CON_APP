@@ -25,7 +25,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-
+//Enpoind para el envio de mensajes
 app.MapPost("/message", async (HttpRequest request, QueueTask<string> queue) =>
 {
     using var reader = new StreamReader(request.Body);
