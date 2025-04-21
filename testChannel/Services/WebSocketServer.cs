@@ -1,12 +1,14 @@
 ﻿using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 
 namespace testChannel.Services
 {
     public class WebSocketServer
     {
         private readonly RequestDelegate _next;
-        private static readonly List<WebSocket> _sockets = new();
+        private static readonly List<WebSocket> _sockets = [];
+        private static readonly Dictionary<string, WebSocket> _clients = new();
 
         public WebSocketServer(RequestDelegate next)
         {
@@ -19,28 +21,81 @@ namespace testChannel.Services
             {
                 using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
                 _sockets.Add(webSocket);
-                await HandleWebSocketConnection(webSocket);
+                await HandleWebSocketConnectionClients(webSocket);
             }
             else
             {
                 await _next(context);
             }
         }
-
-        private async Task HandleWebSocketConnection(WebSocket webSocket)
+        private async Task HandleWebSocketConnectionClients(WebSocket webSocket)
         {
-            var buffer = new byte[1024 * 10];
+            var buffer = new byte[1024 * 4];
+            string? username = null;
+
+            while (true)
+            {
+                var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+
+                if (result.CloseStatus.HasValue)
+                {
+                    if (username != null)
+                    {
+                        _clients.Remove(username);
+                    }
+                    break;
+                }
+
+                var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+               
+                var data = JsonSerializer.Deserialize<Dictionary<string, string>>(message);
+
+                if (data != null && data.ContainsKey("type"))
+                {
+                    if (data["type"] == "register" && data.ContainsKey("username"))
+                    {
+                        username = data["username"];
+                        _clients[username] = webSocket;
+                        Console.WriteLine($"User registered: {username}");
+                    }
+                    else if (data["type"] == "message" && data.ContainsKey("to") && data.ContainsKey("message"))
+                    {
+                        var recipient = data["to"];
+                        var msg = data["message"];
+
+                        if (_clients.TryGetValue(recipient, out var recipientSocket) && recipientSocket.State == WebSocketState.Open)
+                        {
+                            var response = JsonSerializer.Serialize(new
+                            {
+                                type = "message",
+                                from = username,
+                                message = msg
+                            });
+
+                            var responseBuffer = Encoding.UTF8.GetBytes(response);
+                            await recipientSocket.SendAsync(new ArraySegment<byte>(responseBuffer), WebSocketMessageType.Text, true, CancellationToken.None);
+                        }
+                    }
+                }
+            }
+
+            if (username != null)
+            {
+                _clients.Remove(username);
+            }
+
+            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Connection closed", CancellationToken.None);
+        }
+        protected async Task HandleWebSocketConnection(WebSocket webSocket)
+        {
+            var buffer = new byte[1024 * 100];
             var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
 
             while (!result.CloseStatus.HasValue)
             {
                 var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                Console.WriteLine($"Received: {message}");
-
-                // Echo the message back to the client
-                var response = Encoding.UTF8.GetBytes($"Server received: {message}");
-                await webSocket.SendAsync(new ArraySegment<byte>(response), result.MessageType, result.EndOfMessage, CancellationToken.None);
-
+                await BroadcastMessageAsync(message);
+              
                 result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
             }
 
